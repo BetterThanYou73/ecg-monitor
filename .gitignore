@@ -21,3 +21,6 @@ configs/ca-bundle.pem
 .idea/
 .DS_Store
 Thumbs.db
+
+# Private project notes: third-party confidential scope material
+notes/
