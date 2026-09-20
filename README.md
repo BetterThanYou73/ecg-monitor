@@ -62,6 +62,63 @@ that the pause feeds into.
 
 ---
 
+## Ventricular beat classification
+
+Beat morphology and a logistic-regression classifier, evaluated **inter-patient**:
+trained on one group of subjects (de Chazal DS1) and tested on a completely
+different group (DS2), with the four paced records excluded per AAMI.
+
+| Protocol | Sensitivity | PPV | F1 |
+|---|---|---|---|
+| **inter-patient (DS2)** | **92.13%** | **77.25%** | **84.04%** |
+| intra-patient | 92.13% | 78.64% | 84.85% |
+
+24,853 test beats, 1,614 ventricular, identical beats in both rows.
+
+Two deliberate choices about the protocol:
+
+**The split holds subjects out whole.** A random split over beats puts the
+same person's heartbeats in train and test; because one subject's beats all
+look alike, a model can then recognise the *subject* instead of the pathology
+and report a number that collapses on a new patient. The intra-patient row is
+computed only so the size of that effect is visible -- here 0.82 F1 points,
+which is small precisely because the features are subject-relative.
+
+**The decision threshold is chosen on training subjects**, via subject-wise
+folds inside DS1. Choosing it on the test set would reintroduce the same leak
+the split exists to prevent.
+
+Accuracy is not reported. Ventricular beats are a small minority, so a
+classifier that answers "normal" to everything scores above 90%.
+
+### Rhythm context did not survive inter-patient evaluation
+
+Prematurity and compensatory pause are textbook PVC indicators, and they
+separate clearly *within* a subject. Added to the model they made it worse:
+**84.04 F1 with morphology alone against 79.66 with rhythm context added**, on
+identical test beats.
+
+Baseline rhythm varies too much between people, and in the atrial-fibrillation
+records prematurity is meaningless because every interval is irregular, so
+thresholds learned on one group do not carry to another. They bought
+sensitivity and cost more precision than they returned.
+
+This is a limitation to revisit rather than a closed question: a more robust
+per-subject normalisation may recover the signal, and rhythm context is
+expected to be *essential* for supraventricular (PAC) beats, whose morphology
+is near-normal and which are separable mainly by timing.
+
+Precision is the weak point -- 438 false positives against 1,487 true ones.
+Motion artefact is the most likely contributor, and dedicated artefact
+detection is the next thing to add.
+
+```bash
+python scripts/train_pvc.py              # inter-patient, reference beats
+python scripts/train_pvc.py --detected   # end-to-end, detector output
+```
+
+---
+
 ## Long-recording handling
 
 A 24-hour ambulatory recording is not 24 hours of usable ECG, and does not
@@ -101,13 +158,16 @@ src/ecgmon/
     streaming.py          chunked detection for long recordings
   analysis/
     rr.py                 RR intervals, HR trend, time-domain HRV, ectopic screen
+    morphology.py         beat extraction, per-subject templates, beat features
+    beat_classifier.py    ventricular classification, inter-patient split
     evaluation.py         EC57 matching, sensitivity/PPV/F1
   viz/plots.py            detection overview, synchronised multi-channel, HR trend
 scripts/
   fetch_data.py           cache PhysioNet records locally (retries 502s)
   run_pipeline.py         full chain on one record, writes figures
   evaluate_rpeaks.py      benchmark against reference annotations
-tests/                    46 tests, synthetic signals, no network needed
+  train_pvc.py            train/evaluate ventricular classification
+tests/                    71 tests, synthetic signals, no network needed
 ```
 
 ## Setup
@@ -142,19 +202,22 @@ committed.
 
 Implemented: ingestion, preprocessing, signal-quality assessment, dropout and
 coverage handling, R-peak detection, chunked long-recording processing, RR/HR/
-HRV features, a rhythm-level ectopic screen, EC57 evaluation, visualisation.
+HRV features, beat morphology and per-subject templates, ventricular beat
+classification with inter-patient evaluation, EC57 evaluation, visualisation.
 
 Not yet implemented:
 
-1. Beat-morphology features and PVC classification. The ectopic screen is
-   rhythm-only — it narrows the search, it does not diagnose. Record 106
-   carries 520 annotated ventricular beats as a validation target.
-2. A position-independent detector, so cross-position comparisons measure
+1. Motion-artefact detection. Artefacts resemble ectopic beats, and are the
+   likely source of much of the classifier's remaining false-positive rate.
+2. Supraventricular (PAC) classification, which needs the rhythm-context
+   features that ventricular classification did not benefit from.
+3. Atrial-fibrillation detection.
+4. A position-independent detector, so cross-position comparisons measure
    physiology rather than detector bias.
-3. Long-duration analytics: hourly and 24-hour summaries, arrhythmia burden,
+5. Long-duration analytics: hourly and 24-hour summaries, arrhythmia burden,
    temporal distribution.
-4. Backend and interactive dashboard.
-5. Real-sensor integration and clock-drift estimation between sensors, where
+6. Backend and interactive dashboard.
+7. Real-sensor integration and clock-drift estimation between sensors, where
    `clock_offset_s` stops being zero.
 
 ## Data
