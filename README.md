@@ -119,6 +119,40 @@ python scripts/train_pvc.py --detected   # end-to-end, detector output
 
 ---
 
+## Dashboard
+
+`scripts/build_dashboard.py` runs the whole chain on a recording and writes a
+**single self-contained HTML file**: the plotting library is inlined, so the
+report opens offline, survives being emailed, and needs no server.
+
+```bash
+python scripts/build_dashboard.py --record 106
+```
+
+It shows coverage and beat counts, heart-rate and RR trends, a signal-quality
+strip, the hourly distribution of abnormal beats, representative event
+waveforms overlaid for morphology comparison, a per-sensor table, and the
+synchronised multi-sensor traces.
+
+Three things it deliberately does *not* do:
+
+**It does not present derived labels as ground truth.** Every report carries
+the classifier's operating point, so a burden figure is read next to the fact
+that roughly one in four flagged beats is expected to be a false positive.
+
+**It does not quote rates it cannot support.** Rates are per *analysed* hour,
+excluding dropout, and a recording shorter than an hour says its per-hour
+figure is extrapolated rather than measured. Burden, being a ratio over beats,
+is unaffected and stays comparable across recordings of any length.
+
+**It does not draw through gaps.** Missing stretches stay visibly missing in
+the trends instead of being bridged by interpolation.
+
+The classifier is trained on other subjects and applied to the reported
+record, so a record is never scored by a model fitted on it.
+
+---
+
 ## Long-recording handling
 
 A 24-hour ambulatory recording is not 24 hours of usable ECG, and does not
