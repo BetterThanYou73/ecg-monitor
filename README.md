@@ -119,6 +119,43 @@ python scripts/train_pvc.py --detected   # end-to-end, detector output
 
 ---
 
+## Service
+
+```bash
+pip install -e .[server]
+python scripts/serve.py            # http://127.0.0.1:8000, API docs at /docs
+```
+
+Two ingestion routes, because two things will feed it. `POST
+/api/records/{id}/analyse` reads a cached PhysioNet record, which is what
+exists today. `POST /api/upload` takes raw samples as JSON, which is what a
+sensor bridge will post:
+
+```json
+{"record_id": "session-1",
+ "channels": [
+   {"sensor_id": "A", "position": "upper_chest", "fs": 360,
+    "t_start": "2026-01-01T12:00:00+00:00", "samples": [0.01, 0.02]},
+   {"sensor_id": "B", "position": "left_lateral_chest", "fs": 360,
+    "t_start": "2026-01-01T12:00:03+00:00", "clock_offset_s": 0.012,
+    "samples": [0.00, 0.01]}]}
+```
+
+Multi-sensor uploads are accepted from the start, each channel carrying its
+own sampling rate, start time and clock offset. A three-second stagger
+between two sensors produces a recording three seconds longer than either,
+rather than two traces falsely aligned at zero.
+
+Both routes converge on one `analyse_recording`, shared with the command
+line, so the API and the scripts cannot drift into reporting different
+numbers for the same recording. The classifier is fitted once and cached; if
+its training records are not present the service says so and returns
+detection without classification rather than downloading 22 records mid-request.
+
+`GET /api/records/{id}/report` returns the full dashboard as HTML.
+
+---
+
 ## Dashboard
 
 `scripts/build_dashboard.py` runs the whole chain on a recording and writes a
@@ -187,6 +224,7 @@ src/ecgmon/
     filters.py            baseline wander, mains notch, bandpass, resampling
     quality.py            windowed signal-quality index, sensor ranking
     segments.py           dropout and gap detection, coverage reporting
+    artifact.py           motion-artefact detection (kurtosis, bSQI, instability)
   detection/
     rpeaks.py             Pan-Tompkins with inspectable stages, gap recovery
     streaming.py          chunked detection for long recordings
@@ -194,14 +232,23 @@ src/ecgmon/
     rr.py                 RR intervals, HR trend, time-domain HRV, ectopic screen
     morphology.py         beat extraction, per-subject templates, beat features
     beat_classifier.py    ventricular classification, inter-patient split
+    multiclass.py         AAMI N/S/V/F classification
+    af.py                 irregular-rhythm (AF) detection
+    summary.py            burden, hourly distribution, longitudinal summaries
     evaluation.py         EC57 matching, sensitivity/PPV/F1
   viz/plots.py            detection overview, synchronised multi-channel, HR trend
+  viz/dashboard.py        self-contained HTML report
+  app/pipeline.py         the analysis chain as one callable
+  app/server.py           HTTP service: ingestion, analysis, reports
 scripts/
   fetch_data.py           cache PhysioNet records locally (retries 502s)
   run_pipeline.py         full chain on one record, writes figures
   evaluate_rpeaks.py      benchmark against reference annotations
   train_pvc.py            train/evaluate ventricular classification
-tests/                    71 tests, synthetic signals, no network needed
+  train_multiclass.py     train/evaluate AAMI five-class classification
+  build_dashboard.py      full chain on one record -> HTML report
+  serve.py                run the HTTP service
+tests/                    181 tests, synthetic signals, no network needed
 ```
 
 ## Setup
