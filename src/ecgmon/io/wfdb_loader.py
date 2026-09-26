@@ -37,6 +37,43 @@ DEFAULT_DB = "mitdb"
 
 
 @dataclass
+class RhythmAnnotations:
+    """Rhythm-label changes through a record.
+
+    WFDB marks rhythm as transitions, not per-sample: an entry means "this
+    rhythm starts here and runs until the next entry". Labels look like
+    ``(AFIB``, ``(N``, ``(VT``.
+    """
+
+    sample: np.ndarray
+    label: np.ndarray
+    fs: float
+    n_samples: int
+
+    def intervals(self) -> list:
+        """Expand transitions into ``(start_sample, end_sample, label)`` spans."""
+        out = []
+        for i, (s, lab) in enumerate(zip(self.sample, self.label)):
+            end = int(self.sample[i + 1]) if i + 1 < self.sample.size else self.n_samples
+            out.append((int(s), end, str(lab)))
+        return out
+
+    def mask_for(self, label: str) -> np.ndarray:
+        """Per-sample boolean mask of where ``label`` is the active rhythm."""
+        mask = np.zeros(self.n_samples, dtype=bool)
+        for start, end, lab in self.intervals():
+            if lab == label:
+                mask[start:end] = True
+        return mask
+
+    def labels_present(self) -> set:
+        return {str(x) for x in self.label}
+
+    def __len__(self) -> int:
+        return int(self.sample.size)
+
+
+@dataclass
 class BeatAnnotations:
     """Reference beat labels accompanying a WFDB record."""
 
@@ -200,6 +237,57 @@ def load_annotations(
         sample=np.asarray(ann.sample, dtype=np.int64),
         symbol=np.asarray(ann.symbol),
         fs=float(ann.fs),
+    )
+
+
+AFIB_LABEL = "(AFIB"
+
+
+def load_rhythm_annotations(
+    record_name: str,
+    db: str | None = DEFAULT_DB,
+    data_dir: str | Path | None = None,
+    extension: str = "atr",
+) -> RhythmAnnotations:
+    """Load rhythm-label transitions for a record.
+
+    Rhythm labels live in the annotation file's ``aux_note`` field, on entries
+    that mark a change of rhythm. Entries without an aux note are beat
+    annotations and are skipped.
+    """
+    import wfdb
+
+    _configure_tls()
+
+    if data_dir is not None:
+        local = Path(data_dir) / record_name
+        if local.with_suffix(f".{extension}").exists():
+            ann = wfdb.rdann(str(local), extension)
+            hea = wfdb.rdheader(str(local))
+        else:
+            ann = wfdb.rdann(record_name, extension, pn_dir=db)
+            hea = wfdb.rdheader(record_name, pn_dir=db)
+    else:
+        ann = wfdb.rdann(record_name, extension, pn_dir=db)
+        hea = wfdb.rdheader(record_name, pn_dir=db)
+
+    samples, labels = [], []
+    for samp, aux in zip(ann.sample, ann.aux_note or []):
+        if not aux:
+            continue
+        # WFDB aux_note strings carry trailing NUL padding from the binary
+        # format; chr(0) is used rather than an escape so the null never
+        # appears literally in this source file.
+        text = str(aux).replace(chr(0), "").strip()
+        if text.startswith("("):
+            samples.append(int(samp))
+            labels.append(text)
+
+    return RhythmAnnotations(
+        sample=np.asarray(samples, dtype=np.int64),
+        label=np.asarray(labels, dtype=object),
+        fs=float(ann.fs),
+        n_samples=int(hea.sig_len),
     )
 
 
