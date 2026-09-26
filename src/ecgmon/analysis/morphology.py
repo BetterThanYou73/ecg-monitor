@@ -28,8 +28,14 @@ from scipy import signal as sps
 # Window around each R peak. Wide enough to contain the QRS and some of the
 # ST segment, short enough that neighbouring beats do not intrude at high
 # heart rates (at 200 bpm, beats are 300 ms apart).
-BEFORE_S = 0.20
+BEFORE_S = 0.32
 AFTER_S = 0.35
+
+# Where the P wave sits relative to R. Atrial depolarisation precedes the QRS
+# by roughly a PR interval; this span is generous enough to hold it across
+# normal rate variation without reaching into the previous beat's T wave.
+P_START_S = 0.28
+P_END_S = 0.09
 
 # Narrower window used for template correlation: the QRS itself. Including
 # the T wave would let T-wave variation dominate a morphology comparison
@@ -63,6 +69,12 @@ class BeatFeatures:
     # the raw value does not.
     r_amp_ratio: float    # |R| / median |R| for this record
     width_ratio: float    # QRS width / median QRS width for this record
+    # P-wave features. A supraventricular ectopic beat conducts normally below
+    # the atria, so its QRS looks close to normal and morphology alone cannot
+    # separate it from N -- what differs is the atrial activity preceding it,
+    # which may be early, abnormally shaped, or absent.
+    p_energy_ratio: float  # energy in the P window / median for this record
+    p_corr: float          # correlation of the P window with the record's template
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -144,6 +156,14 @@ def _corr_to_template(beats: np.ndarray, template: np.ndarray) -> np.ndarray:
     return out
 
 
+# No QRS lasts longer than this. The search for the complex's edges is
+# bounded by it so that it cannot wander into the P or T wave: those sit
+# inside the analysis window (it is wide enough to hold the P wave for
+# atrial features) and an unbounded search walks straight into them,
+# inflating the measured width for exactly the beats with clear P waves.
+MAX_QRS_HALF_S = 0.12
+
+
 def qrs_widths(
     beats: np.ndarray, fs: float, r_offset: int, frac: float = 0.15
 ) -> np.ndarray:
@@ -175,6 +195,10 @@ def qrs_widths(
     n = beats.shape[1]
     centre = min(max(r_offset, 0), n - 1)
 
+    half = max(1, int(round(MAX_QRS_HALF_S * fs)))
+    lo_bound = max(0, centre - half)
+    hi_bound = min(n - 1, centre + half)
+
     for i in range(beats.shape[0]):
         row = env[i]
         peak = row[centre] if row[centre] > 0 else row.max()
@@ -184,10 +208,10 @@ def qrs_widths(
         thr = frac * peak
 
         left = centre
-        while left > 0 and row[left] > thr:
+        while left > lo_bound and row[left] > thr:
             left -= 1
         right = centre
-        while right < n - 1 and row[right] > thr:
+        while right < hi_bound and row[right] > thr:
             right += 1
 
         widths[i] = (right - left) / fs * 1000.0
@@ -239,6 +263,12 @@ def beat_features(
 
     n_before = int(round(BEFORE_S * fs))
 
+    # P-wave window, measured against this record's own typical P wave.
+    p0 = n_before - int(round(P_START_S * fs))
+    p1 = n_before - int(round(P_END_S * fs))
+    p0, p1 = max(0, p0), max(1, min(beats.shape[1], p1))
+    p_windows = beats[:, p0:p1] if p1 > p0 else np.zeros((beats.shape[0], 1))
+
     # Correlate over the QRS only, so T-wave variation does not dominate.
     q0 = n_before - int(round(QRS_BEFORE_S * fs))
     q1 = n_before + int(round(QRS_AFTER_S * fs))
@@ -250,6 +280,12 @@ def beat_features(
 
     corrs = _corr_to_template(qrs_windows, template)
     widths = qrs_widths(beats, fs, r_offset=n_before)
+
+    p_energy = (p_windows ** 2).sum(axis=1)
+    med_p = np.median(p_energy)
+    p_energy_ratio = p_energy / med_p if med_p > 0 else np.zeros_like(p_energy)
+    p_template = build_template(p_windows) if p_windows.shape[0] > 1 else p_windows[0]
+    p_corrs = _corr_to_template(p_windows, p_template)
 
     r_amp = np.abs(beats[:, n_before])
     energy = (qrs_windows ** 2).sum(axis=1)
@@ -285,6 +321,8 @@ def beat_features(
                 post_rr_ratio=float(post / ref_post) if ref_post and np.isfinite(ref_post) and ref_post > 0 else np.nan,
                 r_amp_ratio=float(amp_ratio[row]),
                 width_ratio=float(width_ratio[row]),
+                p_energy_ratio=float(p_energy_ratio[row]),
+                p_corr=float(p_corrs[row]),
             )
         )
 
@@ -309,6 +347,8 @@ def features_to_array(features: list[BeatFeatures]) -> np.ndarray:
                 f.post_rr_ratio,
                 f.r_amp_ratio,
                 f.width_ratio,
+                f.p_energy_ratio,
+                f.p_corr,
             ]
             for f in features
         ],
@@ -359,4 +399,6 @@ FEATURE_NAMES = [
     "post_rr_ratio",
     "r_amp_ratio",
     "width_ratio",
+    "p_energy_ratio",
+    "p_corr",
 ]

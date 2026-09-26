@@ -13,6 +13,7 @@ from ecgmon.analysis.beat_classifier import (
     score_classification,
 )
 from ecgmon.analysis.morphology import (
+    AFTER_S,
     BEFORE_S,
     FEATURE_NAMES,
     _corr_to_template,
@@ -56,7 +57,9 @@ def synth_record(n_beats=60, rr_s=1.0, fs=FS, width_s=0.012, amplitude=1.0,
 def test_extract_beats_shape():
     x, peaks = synth_record(n_beats=30)
     beats, kept = extract_beats(x, FS, peaks)
-    expected_len = int(round(0.20 * FS)) + int(round(0.35 * FS))
+    # Derived from the module constants, not hardcoded: the window widened
+    # when P-wave features were added, and a literal here silently rots.
+    expected_len = int(round(BEFORE_S * FS)) + int(round(AFTER_S * FS))
     assert beats.shape[1] == expected_len
     assert beats.shape[0] == kept.size
 
