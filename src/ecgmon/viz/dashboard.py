@@ -242,12 +242,14 @@ CSS = """
   --shadow:none;
 }
 *{box-sizing:border-box}
+html{overflow-x:hidden}
 body{
-  margin:0; background:var(--bg); color:var(--ink);
+  margin:0; background:var(--bg); color:var(--ink); overflow-x:hidden;
   font:15px/1.6 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
   -webkit-font-smoothing:antialiased;
 }
-.wrap{max-width:1060px; margin:0 auto; padding-inline:20px; padding-block:0 72px}
+.wrap{max-width:1060px; margin:0 auto; padding-inline:20px; padding-block:0 72px;
+      min-width:0}
 
 header{padding-block:32px 22px; border-bottom:1px solid var(--rule); margin-bottom:26px}
 .kicker{
@@ -290,12 +292,21 @@ h2:first-of-type{margin-top:0}
 .panel{
   background:var(--card); border:1px solid var(--rule); border-radius:10px;
   padding:16px 18px 6px; margin-bottom:14px; box-shadow:var(--shadow);
+  min-width:0;   /* see .two: without this a wide chart props the card open */
 }
 .panel h3{margin:0 0 2px; font-size:15px; font-weight:650; letter-spacing:-.01em}
 .panel .cap{margin:0 0 6px; font-size:13px; color:var(--ink-2); max-width:78ch}
-.plot{width:100%}
-.two{display:grid; grid-template-columns:1fr 1fr; gap:14px}
-@media (max-width:760px){.two{grid-template-columns:1fr}}
+.plot{width:100%; min-width:0; overflow:hidden}
+
+/* "1fr" is shorthand for minmax(auto, 1fr), and that auto minimum means a
+   track will not shrink below the intrinsic width of what is inside it. A
+   chart rendered wider than its column therefore props the column open
+   instead of being constrained by it, the card overflows its card, and the
+   page gains a horizontal scrollbar. minmax(0, 1fr) lets the track shrink,
+   which is what allows the plot to be told how wide it may be.
+   The same reasoning puts min-width:0 on the panel and the plot box. */
+.two{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:14px}
+@media (max-width:760px){.two{grid-template-columns:minmax(0,1fr)}}
 
 .scroll{overflow-x:auto}
 table{border-collapse:collapse; width:100%; font-size:13.5px; min-width:520px}
