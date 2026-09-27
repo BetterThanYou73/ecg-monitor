@@ -25,6 +25,13 @@
   };
 
   var DATA = window.__ECG__ || {};
+
+  /* Honour the viewer's motion preference for the charts too: Plotly's own
+     transitions are not covered by the stylesheet's reduced-motion rule. */
+  var REDUCED = window.matchMedia &&
+                window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var MORPH = REDUCED ? {duration: 0}
+                      : {duration: 260, easing: 'cubic-in-out'};
   var store = {
     get: function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -106,14 +113,55 @@
         document.querySelectorAll('[data-sensor-panel]').forEach(function (p) {
           p.hidden = p.getAttribute('data-sensor-panel') !== id;
         });
-        /* A plot sized while its container was hidden lays out at zero width
-           and stays that way; it has to be resized once it is on screen. */
-        if (window.Plotly) {
-          document.querySelectorAll('[data-sensor-panel]:not([hidden]) .js-plotly-plot')
-            .forEach(function (gd) { try { Plotly.Plots.resize(gd); } catch (e) {} });
-        }
+        resizeVisible();
       });
     });
+  }
+
+  /* ------------------------------------------------------------ sizing */
+
+  /* A plot laid out while its container was hidden takes a width from
+     nothing and keeps it: on reveal one chart is too narrow for its card and
+     another overflows it. Resizing on the tab click alone is not enough,
+     because the panel has not been laid out at the moment the handler runs.
+     Observing each container covers every cause - reveal, window resize,
+     a font loading late - without guessing when to act. */
+  function resizeVisible() {
+    if (!window.Plotly) return;
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        document.querySelectorAll('.js-plotly-plot').forEach(function (gd) {
+          if (!gd.offsetParent && gd.offsetWidth === 0) return;  // still hidden
+          try { Plotly.Plots.resize(gd); } catch (e) {}
+        });
+      });
+    });
+  }
+
+  function initSizing() {
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', resizeVisible);
+      return;
+    }
+    var pending = null;
+    var ro = new ResizeObserver(function () {
+      /* Resizing a plot changes its container, which fires the observer
+         again; coalescing on a frame stops that becoming a loop. */
+      if (pending) cancelAnimationFrame(pending);
+      pending = requestAnimationFrame(function () {
+        pending = null;
+        document.querySelectorAll('.js-plotly-plot').forEach(function (gd) {
+          if (!gd.offsetParent && gd.offsetWidth === 0) return;
+          var box = gd.parentElement;
+          if (!box) return;
+          var w = Math.round(box.clientWidth);
+          if (w > 0 && Math.abs((gd._fullLayout && gd._fullLayout.width || 0) - w) > 1) {
+            try { Plotly.Plots.resize(gd); } catch (e) {}
+          }
+        });
+      });
+    });
+    document.querySelectorAll('.plot').forEach(function (box) { ro.observe(box); });
   }
 
   /* ----------------------------------------------------- 3. linked zoom */
@@ -207,7 +255,13 @@
       };
     });
 
+    /* Transition rather than redraw: the waveforms morph from the previous
+       block to the new one, which makes it obvious that the click did
+       something and which part of the figure changed. */
+    var cls = host.className;
+    host.className = cls.replace(/\s*inspect-flash/, '') + ' inspect-flash';
     Plotly.react(host, traces, {
+      transition: MORPH,
       height: 230,
       margin: {l: 58, r: 16, t: 10, b: 42},
       paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
@@ -239,8 +293,10 @@
     initTheme();
     applyTheme();
     initTabs();
+    initSizing();
     initLinkedZoom();
     initInspector();
+    resizeVisible();
 
     /* Open each sensor's inspector on its busiest block, so the panel shows
        something real instead of an empty frame waiting to be clicked. */

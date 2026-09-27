@@ -61,7 +61,6 @@ def _fig_html(fig, include_js: bool) -> str:
         include_plotlyjs="inline" if include_js else False,
         config={"displaylogo": False, "responsive": True,
                 "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"]},
-        default_height="100%",
     )
 
 
@@ -330,7 +329,18 @@ tr:last-child td{border-bottom:0}
   font-size:11.5px; color:var(--trace); font-weight:550;
   margin:0 0 6px; display:flex; align-items:center; gap:5px;
 }
-@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+/* Motion is used to point at what changed, not to decorate. Panels fade as
+   you move between sensors so a switch does not look like a redraw of the
+   same data; the inspector slides a little when new waveforms load. Both are
+   short enough to read as feedback rather than as an effect. */
+@keyframes panel-in{from{opacity:0; transform:translateY(4px)} to{opacity:1; transform:none}}
+[data-sensor-panel]:not([hidden]){animation:panel-in .22s ease-out}
+.inspect-flash{animation:panel-in .26s ease-out}
+.panel{transition:border-color .15s ease}
+.panel.clickable:hover{border-color:var(--trace)}
+@media (prefers-reduced-motion:reduce){
+  *{transition:none!important; animation:none!important}
+}
 footer{margin-top:40px; padding-top:16px; border-top:1px solid var(--rule);
        color:var(--ink-3); font-size:12.5px}
 .js-modebar{opacity:.5}
