@@ -24,3 +24,6 @@ Thumbs.db
 
 # Private project notes: third-party confidential scope material
 notes/
+
+# docs/ holds the published demo page and is committed on purpose;
+# outputs/ above stays ignored.
