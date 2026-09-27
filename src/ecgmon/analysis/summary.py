@@ -32,8 +32,9 @@ class EventSummary:
     count: int
     burden_pct: float        # share of all analysed beats
     per_hour: float          # events per analysed hour
-    max_hourly: int          # busiest single hour
+    max_hourly: int          # busiest single bin
     analysed_hours: float = 0.0
+    bin_s: float = SECONDS_PER_HOUR
     hourly_counts: np.ndarray = field(repr=False, default_factory=lambda: np.array([]))
     hour_edges: np.ndarray = field(repr=False, default_factory=lambda: np.array([]))
 
@@ -99,6 +100,53 @@ class ChannelSummary:
         return "\n".join(lines)
 
 
+def choose_bin_seconds(duration_s: float) -> float:
+    """Pick a histogram bin width that actually shows the distribution.
+
+    Binning a 30-minute recording by the hour produces a single bar: the chart
+    meant to show *when* events happened shows only how many there were. The
+    aim is roughly 12-40 bars whatever the recording length, so the shape of
+    the distribution is visible at half an hour and at a full day alike.
+    """
+    for span, width in (
+        (20 * 60, 60.0),          # under 20 min -> per minute
+        (SECONDS_PER_HOUR, 120.0),        # under 1 h -> 2 minutes
+        (2 * SECONDS_PER_HOUR, 300.0),    # under 2 h -> 5 minutes
+        (8 * SECONDS_PER_HOUR, 900.0),    # under 8 h -> 15 minutes
+        (30 * SECONDS_PER_HOUR, SECONDS_PER_HOUR),   # under 30 h -> hourly
+    ):
+        if duration_s <= span:
+            return width
+    return 2 * SECONDS_PER_HOUR
+
+
+def bin_label(bin_s: float) -> str:
+    """Axis label naming the bin width, e.g. "events per 5 min"."""
+    if bin_s < SECONDS_PER_HOUR:
+        return f"{int(round(bin_s / 60))} min"
+    hours = bin_s / SECONDS_PER_HOUR
+    return "hour" if abs(hours - 1) < 1e-9 else f"{hours:g} h"
+
+
+def event_histogram(
+    event_samples: np.ndarray, fs: float, duration_s: float,
+    bin_s: float | None = None,
+) -> tuple:
+    """Bin event times, choosing a sensible bin width for the duration.
+
+    Returns ``(counts, edges_in_seconds, bin_s)``.
+    """
+    if bin_s is None:
+        bin_s = choose_bin_seconds(duration_s)
+    n_bins = max(1, int(np.ceil(duration_s / bin_s)))
+    edges = np.arange(n_bins + 1, dtype=float) * bin_s
+    if np.asarray(event_samples).size == 0:
+        return np.zeros(n_bins, dtype=int), edges, bin_s
+    times = np.asarray(event_samples, dtype=np.float64) / fs
+    counts, _ = np.histogram(times, bins=edges)
+    return counts.astype(int), edges, bin_s
+
+
 def hourly_histogram(
     event_samples: np.ndarray, fs: float, duration_s: float
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -127,7 +175,7 @@ def summarize_events(
 ) -> EventSummary:
     """Counts, burden and hourly distribution for one abnormal-beat class."""
     event_samples = np.asarray(event_samples)
-    counts, edges = hourly_histogram(event_samples, fs, duration_s)
+    counts, edges, bin_s = event_histogram(event_samples, fs, duration_s)
     n = int(event_samples.size)
 
     burden = 100.0 * n / total_beats if total_beats else 0.0
@@ -141,6 +189,7 @@ def summarize_events(
         per_hour=per_hour,
         max_hourly=int(counts.max()) if counts.size else 0,
         analysed_hours=hours,
+        bin_s=bin_s,
         hourly_counts=counts,
         hour_edges=edges,
     )

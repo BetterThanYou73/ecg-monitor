@@ -180,7 +180,7 @@ def test_dashboard_writes_self_contained_html(tmp_path: Path):
     assert out.exists()
     # Plotly must be inlined exactly once, or the file both bloats and breaks.
     assert text.count("plotly.js v") <= 1
-    assert "Overview" in text
+    assert "At a glance" in text
     assert "PVC" in text
 
     # The report must load nothing over the network. Checking for the substring

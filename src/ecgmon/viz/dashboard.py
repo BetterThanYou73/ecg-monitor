@@ -1,17 +1,22 @@
 """Interactive monitoring dashboard.
 
-Produces a single self-contained HTML file: Plotly is inlined, so the report
-opens offline, survives being emailed, and needs no server. That matters
-while there is no live data source -- a report a supervisor can double-click
-is worth more right now than a web service with nothing plugged into it.
+Produces a single self-contained HTML file: the plotting library is inlined,
+so the report opens offline, survives being emailed, and needs no server.
+While there is no live data source, a report that can be double-clicked is
+worth more than a service with nothing plugged into it.
 
-The layout is driven by what a reviewer asks of a 24-hour recording, roughly
-in order: how much of this is trustworthy, what happened overall, when did it
-happen, and what did it actually look like.
+Two things this file has to get right that a chart library does not do for it.
 
-Built multi-sensor first, like the rest of the pipeline. With one channel the
-per-sensor sections collapse to a single column; with several they sit side
-by side on a shared timeline.
+**Theme.** The page follows the viewer's light or dark setting, but a plot's
+axis text, tick labels and gridlines are baked in when the figure is
+serialised. Fixed colours mean one theme renders dark text on a dark ground.
+So the palette is applied at view time: the page reads the effective theme,
+restyles every plot through it, and listens for the setting changing.
+
+**Explaining itself.** Each chart carries a sentence saying what it shows and
+how to read it. A burden figure or an RR scatter is not self-evident to
+someone seeing the system for the first time, and a dashboard that needs its
+author standing next to it is not finished.
 """
 
 from __future__ import annotations
@@ -21,15 +26,26 @@ from pathlib import Path
 
 import numpy as np
 
-# Palette chosen to stay legible in both light and dark viewers, and to keep
-# the abnormal-event colour distinct from the signal trace at a glance.
-COL_BG = "#ffffff"
-COL_INK = "#1f2a44"
-COL_MUTED = "#6b7a90"
-COL_LINE = "#2a6f97"
-COL_EVENT = "#d1495b"
-COL_GOOD = "#3a7d44"
-COL_WARN = "#c77d0a"
+# Semantic roles, resolved to light/dark values at view time by THEME_JS.
+# Kept as tokens here so the Python and the JavaScript cannot disagree.
+ROLE_INK = "ink"
+ROLE_MUTED = "muted"
+ROLE_GRID = "grid"
+ROLE_TRACE = "trace"
+ROLE_EVENT = "event"
+ROLE_GOOD = "good"
+
+# Placeholder colours used when the figure is serialised. Every one of them is
+# overwritten by the theme script before the viewer sees it; they exist only so
+# the JSON is valid and so a plot is not invisible if scripting is blocked.
+_PLACEHOLDER = {
+    ROLE_INK: "#8a94a3",
+    ROLE_MUTED: "#8a94a3",
+    ROLE_GRID: "rgba(138,148,163,0.22)",
+    ROLE_TRACE: "#3d8fb0",
+    ROLE_EVENT: "#d1495b",
+    ROLE_GOOD: "#4f9e72",
+}
 
 
 def _plotly():
@@ -39,219 +55,333 @@ def _plotly():
 
 
 def _fig_html(fig, include_js: bool) -> str:
-    """Render one figure, inlining plotly.js only on the first call."""
     return fig.to_html(
         full_html=False,
         include_plotlyjs="inline" if include_js else False,
-        config={"displaylogo": False, "responsive": True},
+        config={"displaylogo": False, "responsive": True,
+                "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"]},
+        default_height="100%",
     )
 
 
-def _layout(fig, title: str, height: int = 280, ytitle: str = "", xtitle: str = ""):
+def _layout(fig, height=260, ytitle="", xtitle=""):
+    """Chart chrome. Titles live in the page, not in the plot.
+
+    A plot-level title duplicates the heading already above it and eats
+    vertical space the data could use.
+    """
     fig.update_layout(
-        title=dict(text=title, font=dict(size=14, color=COL_INK)),
         height=height,
-        margin=dict(l=60, r=20, t=44, b=40),
+        margin=dict(l=58, r=16, t=10, b=42),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=COL_INK, size=12),
-        xaxis=dict(title=xtitle, gridcolor="rgba(128,128,128,0.18)", zeroline=False),
-        yaxis=dict(title=ytitle, gridcolor="rgba(128,128,128,0.18)", zeroline=False),
+        font=dict(color=_PLACEHOLDER[ROLE_MUTED], size=11.5,
+                  family='ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif'),
+        xaxis=dict(title=dict(text=xtitle, font=dict(size=11)),
+                   gridcolor=_PLACEHOLDER[ROLE_GRID], zeroline=False,
+                   linecolor=_PLACEHOLDER[ROLE_GRID]),
+        yaxis=dict(title=dict(text=ytitle, font=dict(size=11)),
+                   gridcolor=_PLACEHOLDER[ROLE_GRID], zeroline=False,
+                   linecolor=_PLACEHOLDER[ROLE_GRID]),
         showlegend=False,
         hovermode="x unified",
+        hoverlabel=dict(font_size=12),
     )
     return fig
 
 
-def _stat(label: str, value: str, note: str = "", tone: str = "") -> str:
-    colour = {"good": COL_GOOD, "warn": COL_WARN, "event": COL_EVENT}.get(tone, COL_INK)
-    note_html = f'<div class="note">{html.escape(note)}</div>' if note else ""
-    return (
-        f'<div class="stat"><div class="label">{html.escape(label)}</div>'
-        f'<div class="value" style="color:{colour}">{html.escape(value)}</div>'
-        f"{note_html}</div>"
-    )
+# --------------------------------------------------------------- figures
 
 
-def _hr_figure(summary, include_js: bool) -> str:
+def _hr_figure(summary, include_js):
     go = _plotly()
     fig = go.Figure()
     if summary.hr_trend_t.size:
-        fig.add_trace(
-            go.Scatter(
-                x=summary.hr_trend_t / 60.0,
-                y=summary.hr_trend_bpm,
-                mode="lines",
-                line=dict(color=COL_LINE, width=1.6),
-                name="HR",
-                connectgaps=False,  # gaps are data, not a drawing artefact
-                hovertemplate="%{y:.0f} bpm at %{x:.1f} min<extra></extra>",
-            )
-        )
-    _layout(fig, "Heart rate", ytitle="bpm", xtitle="minutes")
+        fig.add_trace(go.Scatter(
+            x=summary.hr_trend_t / 60.0, y=summary.hr_trend_bpm, mode="lines",
+            line=dict(color=_PLACEHOLDER[ROLE_TRACE], width=2, shape="spline"),
+            connectgaps=False,   # a gap in the data is information, not a glitch
+            hovertemplate="%{y:.0f} bpm<extra></extra>"))
+    _layout(fig, ytitle="bpm", xtitle="minutes into recording")
     return _fig_html(fig, include_js)
 
 
-def _events_figure(summary, label: str, include_js: bool) -> str:
-    """Hourly distribution of one abnormal-beat class."""
+def _rr_figure(summary, include_js):
+    go = _plotly()
+    fig = go.Figure()
+    if summary.rr_t.size:
+        # A 24 h trace is ~100k points; browsers stall well before that.
+        step = max(1, summary.rr_t.size // 6000)
+        fig.add_trace(go.Scattergl(
+            x=summary.rr_t[::step] / 60.0, y=summary.rr_s[::step] * 1000.0,
+            mode="markers",
+            marker=dict(size=3, color=_PLACEHOLDER[ROLE_TRACE], opacity=.5),
+            hovertemplate="%{y:.0f} ms<extra></extra>"))
+    _layout(fig, ytitle="interval (ms)", xtitle="minutes into recording")
+    return _fig_html(fig, include_js)
+
+
+def _sqi_figure(summary, include_js):
+    go = _plotly()
+    fig = go.Figure()
+    if summary.sqi_t.size:
+        fig.add_trace(go.Scatter(
+            x=summary.sqi_t / 60.0, y=summary.sqi, mode="lines",
+            line=dict(color=_PLACEHOLDER[ROLE_GOOD], width=1.6),
+            fill="tozeroy", fillcolor="rgba(79,158,114,0.16)",
+            hovertemplate="SQI %{y:.2f}<extra></extra>"))
+        fig.add_hline(y=0.5, line=dict(color=_PLACEHOLDER[ROLE_EVENT],
+                                       width=1, dash="dot"))
+    _layout(fig, height=190, ytitle="quality", xtitle="minutes into recording")
+    fig.update_yaxes(range=[0, 1.02])
+    return _fig_html(fig, include_js)
+
+
+def _events_figure(summary, label, include_js):
     go = _plotly()
     ev = summary.events.get(label)
     fig = go.Figure()
     if ev is not None and ev.hourly_counts.size:
-        centres = ev.hour_edges[:-1] + 0.5
-        fig.add_trace(
-            go.Bar(
-                x=centres,
-                y=ev.hourly_counts,
-                marker_color=COL_EVENT,
-                hovertemplate="hour %{x:.0f}: %{y} events<extra></extra>",
-            )
-        )
-    _layout(fig, f"{label} events per hour", ytitle="count", xtitle="hour of recording")
+        centres = (ev.hour_edges[:-1] + ev.bin_s / 2) / 60.0
+        fig.add_trace(go.Bar(
+            x=centres, y=ev.hourly_counts,
+            width=(ev.bin_s / 60.0) * 0.86,   # a real width; else one bin fills the axis
+            marker_color=_PLACEHOLDER[ROLE_EVENT],
+            hovertemplate="%{y} events<extra></extra>"))
+    _layout(fig, height=220, ytitle="events", xtitle="minutes into recording")
     return _fig_html(fig, include_js)
 
 
-def _rr_figure(summary, include_js: bool) -> str:
+def _waveforms_figure(examples, include_js):
     go = _plotly()
     fig = go.Figure()
-    if summary.rr_t.size:
-        # Subsample for very long recordings: a 24 h trace is ~100k points and
-        # browsers stop being responsive well before that.
-        step = max(1, summary.rr_t.size // 8000)
-        fig.add_trace(
-            go.Scattergl(
-                x=summary.rr_t[::step] / 60.0,
-                y=summary.rr_s[::step] * 1000.0,
-                mode="markers",
-                marker=dict(size=2.5, color=COL_LINE, opacity=0.55),
-                hovertemplate="%{y:.0f} ms at %{x:.1f} min<extra></extra>",
-            )
-        )
-    _layout(fig, "RR intervals", ytitle="ms", xtitle="minutes")
+    for centre, t, wave in examples:
+        fig.add_trace(go.Scatter(
+            x=t, y=wave, mode="lines",
+            line=dict(width=1.2, color=_PLACEHOLDER[ROLE_EVENT]), opacity=.5,
+            hoverinfo="skip"))
+    fig.add_vline(x=0, line=dict(color=_PLACEHOLDER[ROLE_MUTED],
+                                 width=1, dash="dot"))
+    _layout(fig, height=240, ytitle="mV", xtitle="seconds from the flagged beat")
     return _fig_html(fig, include_js)
 
 
-def _sqi_figure(summary, include_js: bool) -> str:
-    go = _plotly()
-    fig = go.Figure()
-    if summary.sqi_t.size:
-        fig.add_trace(
-            go.Scatter(
-                x=summary.sqi_t / 60.0,
-                y=summary.sqi,
-                mode="lines",
-                line=dict(color=COL_GOOD, width=1.2),
-                fill="tozeroy",
-                fillcolor="rgba(58,125,68,0.15)",
-                hovertemplate="SQI %{y:.2f} at %{x:.1f} min<extra></extra>",
-            )
-        )
-        fig.add_hline(y=0.5, line=dict(color=COL_WARN, width=1, dash="dash"))
-    _layout(fig, "Signal quality", ytitle="SQI", xtitle="minutes")
-    fig.update_yaxes(range=[0, 1])
-    return _fig_html(fig, include_js)
-
-
-def _waveforms_figure(examples: list, label: str, include_js: bool) -> str:
-    """Representative event waveforms, drawn on a shared time axis."""
-    go = _plotly()
-    fig = go.Figure()
-    for i, (centre, t, wave) in enumerate(examples):
-        fig.add_trace(
-            go.Scatter(
-                x=t,
-                y=wave + i * 0.0,  # no offset: overlay so morphology compares
-                mode="lines",
-                line=dict(width=1.1),
-                opacity=0.75,
-                name=f"t={centre}",
-                hovertemplate=f"event at sample {centre}<extra></extra>",
-            )
-        )
-    fig.add_vline(x=0, line=dict(color=COL_MUTED, width=1, dash="dot"))
-    _layout(fig, f"Representative {label} waveforms (overlaid, aligned on beat)",
-            ytitle="mV", xtitle="seconds from event")
-    return _fig_html(fig, include_js)
-
-
-def _multichannel_figure(recording, peaks_by_sensor, window_s, include_js: bool) -> str:
-    """Synchronised traces from every sensor on one reference timeline."""
+def _multichannel_figure(recording, peaks_by_sensor, window_s, include_js):
     go = _plotly()
     from plotly.subplots import make_subplots
 
     n = recording.n_channels
-    fig = make_subplots(rows=n, cols=1, shared_xaxes=True, vertical_spacing=0.04,
-                        subplot_titles=[f"{c.sensor_id} — {c.position}" for c in recording])
+    fig = make_subplots(rows=n, cols=1, shared_xaxes=True, vertical_spacing=.07,
+                        subplot_titles=[f"{c.sensor_id} — {c.position}"
+                                        for c in recording])
     origin = recording.t_origin
     t0, t1 = window_s
-
     for r, ch in enumerate(recording, start=1):
         elapsed = ch.elapsed_since(origin)
         m = (elapsed >= t0) & (elapsed <= t1)
-        fig.add_trace(
-            go.Scattergl(x=elapsed[m], y=ch.signal[m], mode="lines",
-                         line=dict(color=COL_INK, width=1)),
-            row=r, col=1,
-        )
+        fig.add_trace(go.Scattergl(
+            x=elapsed[m], y=ch.signal[m], mode="lines",
+            line=dict(color=_PLACEHOLDER[ROLE_TRACE], width=1.1),
+            hoverinfo="skip"), row=r, col=1)
         pk = np.asarray(peaks_by_sensor.get(ch.sensor_id, []), dtype=int)
         pk = pk[(pk >= 0) & (pk < ch.n_samples)]
         if pk.size:
             pt = elapsed[pk]
             sel = (pt >= t0) & (pt <= t1)
-            fig.add_trace(
-                go.Scattergl(x=pt[sel], y=ch.signal[pk][sel], mode="markers",
-                             marker=dict(color=COL_EVENT, size=6, symbol="triangle-down")),
-                row=r, col=1,
-            )
+            fig.add_trace(go.Scattergl(
+                x=pt[sel], y=ch.signal[pk][sel], mode="markers",
+                marker=dict(color=_PLACEHOLDER[ROLE_EVENT], size=7,
+                            symbol="triangle-down"),
+                hoverinfo="skip"), row=r, col=1)
 
     fig.update_layout(
-        height=190 * n + 60,
-        margin=dict(l=60, r=20, t=50, b=40),
+        height=168 * n + 40, margin=dict(l=58, r=16, t=26, b=42),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=COL_INK, size=11), showlegend=False,
-        title=dict(text="Synchronised sensor traces", font=dict(size=14)),
-    )
-    fig.update_xaxes(gridcolor="rgba(128,128,128,0.18)",
-                     title_text="seconds from recording origin", row=n, col=1)
-    fig.update_yaxes(gridcolor="rgba(128,128,128,0.18)")
+        font=dict(color=_PLACEHOLDER[ROLE_MUTED], size=11),
+        showlegend=False)
+    fig.update_xaxes(gridcolor=_PLACEHOLDER[ROLE_GRID], zeroline=False,
+                     linecolor=_PLACEHOLDER[ROLE_GRID])
+    fig.update_yaxes(gridcolor=_PLACEHOLDER[ROLE_GRID], zeroline=False,
+                     linecolor=_PLACEHOLDER[ROLE_GRID])
+    fig.update_xaxes(title=dict(text="seconds from recording start",
+                                font=dict(size=11)), row=n, col=1)
     for ann in fig.layout.annotations:
-        ann.font.size = 11
+        ann.font.size = 11.5
+        ann.font.color = _PLACEHOLDER[ROLE_MUTED]
     return _fig_html(fig, include_js)
 
 
+# ------------------------------------------------------------------ page
+
+
 CSS = """
-*{box-sizing:border-box}
-body{margin:0;background:#f7f8fa;color:#1f2a44;
-     font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 60px}
-header{border-bottom:2px solid #1f2a44;padding-bottom:14px;margin-bottom:22px}
-h1{margin:0 0 4px;font-size:22px;letter-spacing:-.01em}
-.sub{color:#6b7a90;font-size:13px}
-h2{font-size:15px;margin:30px 0 12px;padding-bottom:6px;
-   border-bottom:1px solid rgba(128,128,128,.25);letter-spacing:.01em}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:14px 0 6px}
-.stat{background:#fff;border:1px solid rgba(128,128,128,.2);border-radius:8px;padding:12px 14px}
-.stat .label{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#6b7a90}
-.stat .value{font-size:21px;font-weight:600;margin-top:3px}
-.stat .note{font-size:11px;color:#6b7a90;margin-top:2px}
-.card{background:#fff;border:1px solid rgba(128,128,128,.2);border-radius:8px;
-      padding:6px 10px;margin-bottom:16px;overflow-x:auto}
-.caveat{background:#fff8e6;border-left:3px solid #c77d0a;padding:10px 14px;
-        border-radius:0 6px 6px 0;margin:14px 0;font-size:13px}
-table{border-collapse:collapse;width:100%;font-size:13px;background:#fff}
-th,td{text-align:left;padding:8px 10px;border-bottom:1px solid rgba(128,128,128,.18)}
-th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#6b7a90}
-td.num{text-align:right;font-variant-numeric:tabular-nums}
-footer{margin-top:36px;padding-top:14px;border-top:1px solid rgba(128,128,128,.25);
-       color:#6b7a90;font-size:12px}
-@media (prefers-color-scheme:dark){
-  body{background:#12151a;color:#e6e9ef}
-  .stat,.card,table{background:#1a1e26;border-color:rgba(160,170,190,.18)}
-  header{border-bottom-color:#e6e9ef}
-  .caveat{background:#2a2312;border-left-color:#c77d0a}
-  th,.sub,.stat .label,.stat .note,footer{color:#9aa6b8}
+:root{
+  color-scheme:light;
+  --bg:#f4f5f7; --card:#ffffff; --ink:#111820; --ink-2:#4a5563; --ink-3:#7a8694;
+  --rule:#e1e5ea; --rule-2:#eef1f4;
+  --accent:#b3283c; --trace:#2c7c9c; --good:#3f8a63; --warn:#9a6410;
+  --grid:rgba(120,132,148,.20);
+  --shadow:0 1px 2px rgba(17,24,32,.05);
 }
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --bg:#0e1116; --card:#161a21; --ink:#e8ecf1; --ink-2:#a7b1bd; --ink-3:#727d8a;
+    --rule:#262c35; --rule-2:#1c2129;
+    --accent:#e8697c; --trace:#5fb3d4; --good:#68bd92; --warn:#d9a256;
+    --grid:rgba(150,162,178,.18);
+    --shadow:none;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#0e1116; --card:#161a21; --ink:#e8ecf1; --ink-2:#a7b1bd; --ink-3:#727d8a;
+  --rule:#262c35; --rule-2:#1c2129;
+  --accent:#e8697c; --trace:#5fb3d4; --good:#68bd92; --warn:#d9a256;
+  --grid:rgba(150,162,178,.18);
+  --shadow:none;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:15px/1.6 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1060px; margin:0 auto; padding-inline:20px; padding-block:0 72px}
+
+header{padding-block:32px 22px; border-bottom:1px solid var(--rule); margin-bottom:26px}
+.kicker{
+  font-size:11px; font-weight:650; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--accent); margin-bottom:7px;
+}
+h1{margin:0; font-size:clamp(21px,3.4vw,27px); font-weight:650; letter-spacing:-.02em}
+.meta{margin:7px 0 0; color:var(--ink-3); font-size:13.5px}
+
+h2{
+  font-size:12px; font-weight:650; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--ink-3); margin:36px 0 12px;
+}
+h2:first-of-type{margin-top:0}
+
+/* key figures: a compact ledger, not a wall of tiles */
+.figures{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(118px,1fr));
+  background:var(--card); border:1px solid var(--rule); border-radius:10px;
+  overflow:hidden; box-shadow:var(--shadow);
+}
+.figures > div{padding:13px 15px; border-right:1px solid var(--rule-2)}
+.figures > div:last-child{border-right:0}
+.fk{font-size:10.5px; font-weight:600; letter-spacing:.07em; text-transform:uppercase;
+    color:var(--ink-3); margin-bottom:3px; white-space:nowrap}
+.fv{font-size:20px; font-weight:650; letter-spacing:-.02em; font-variant-numeric:tabular-nums}
+.fv.hl{color:var(--accent)}
+.fn{font-size:11.5px; color:var(--ink-3); margin-top:2px; line-height:1.35}
+
+.readme{
+  margin-top:14px; background:var(--card); border:1px solid var(--rule);
+  border-radius:10px; padding:15px 18px; box-shadow:var(--shadow);
+}
+.readme b{display:block; font-size:12.5px; margin-bottom:7px;
+          letter-spacing:.02em; color:var(--warn)}
+.readme ul{margin:0; padding-left:17px; color:var(--ink-2); font-size:13.5px}
+.readme li{margin-bottom:4px}
+.readme li:last-child{margin-bottom:0}
+
+.panel{
+  background:var(--card); border:1px solid var(--rule); border-radius:10px;
+  padding:16px 18px 6px; margin-bottom:14px; box-shadow:var(--shadow);
+}
+.panel h3{margin:0 0 2px; font-size:15px; font-weight:650; letter-spacing:-.01em}
+.panel .cap{margin:0 0 6px; font-size:13px; color:var(--ink-2); max-width:78ch}
+.plot{width:100%}
+.two{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+@media (max-width:760px){.two{grid-template-columns:1fr}}
+
+.scroll{overflow-x:auto}
+table{border-collapse:collapse; width:100%; font-size:13.5px; min-width:520px}
+th{font-size:10.5px; font-weight:600; letter-spacing:.07em; text-transform:uppercase;
+   color:var(--ink-3); text-align:left; padding:0 12px 8px 0;
+   border-bottom:1px solid var(--rule)}
+td{padding:10px 12px 10px 0; border-bottom:1px solid var(--rule-2)}
+td.n{text-align:right; font-variant-numeric:tabular-nums; padding-right:0}
+th.n{text-align:right; padding-right:0}
+tr:last-child td{border-bottom:0}
+
+footer{margin-top:40px; padding-top:16px; border-top:1px solid var(--rule);
+       color:var(--ink-3); font-size:12.5px}
+.js-modebar{opacity:.5}
 """
+
+# Applied after the plots exist. Plotly bakes colours into the serialised
+# figure, so a page that follows the viewer's theme has to restyle them here.
+THEME_JS = """
+(function () {
+  var ROLES = {
+    light: {ink:'#111820', muted:'#5a6572', grid:'rgba(120,132,148,.20)',
+            trace:'#2c7c9c', event:'#b3283c', good:'#3f8a63'},
+    dark:  {ink:'#e8ecf1', muted:'#9aa5b2', grid:'rgba(150,162,178,.18)',
+            trace:'#5fb3d4', event:'#e8697c', good:'#68bd92'}
+  };
+  var SWAP = {
+    '#8a94a3':'muted', 'rgba(138,148,163,0.22)':'grid',
+    '#3d8fb0':'trace', '#d1495b':'event', '#4f9e72':'good'
+  };
+  function theme() {
+    var set = document.documentElement.getAttribute('data-theme');
+    if (set === 'dark' || set === 'light') return set;
+    return window.matchMedia &&
+           window.matchMedia('(prefers-color-scheme: dark)').matches
+           ? 'dark' : 'light';
+  }
+  function walk(node, pal) {
+    if (Array.isArray(node)) { node.forEach(function (n) { walk(n, pal); }); return; }
+    if (!node || typeof node !== 'object') return;
+    Object.keys(node).forEach(function (k) {
+      var v = node[k];
+      if (typeof v === 'string' && SWAP[v]) node[k] = pal[SWAP[v]];
+      else if (v && typeof v === 'object') walk(v, pal);
+    });
+  }
+  function apply() {
+    if (!window.Plotly) return;
+    var pal = ROLES[theme()];
+    document.querySelectorAll('.js-plotly-plot').forEach(function (gd) {
+      try {
+        walk(gd.layout, pal);
+        walk(gd.data, pal);
+        if (gd.layout.font) gd.layout.font.color = pal.muted;
+        (gd.layout.annotations || []).forEach(function (a) {
+          if (a.font) a.font.color = pal.muted;
+        });
+        Plotly.react(gd, gd.data, gd.layout, gd._context);
+      } catch (e) { /* one bad plot must not blank the rest of the page */ }
+    });
+  }
+  function boot() { apply(); }
+  if (document.readyState === 'complete') { boot(); }
+  else { window.addEventListener('load', boot); }
+  if (window.matchMedia) {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    (mq.addEventListener ? mq.addEventListener.bind(mq, 'change')
+                         : mq.addListener.bind(mq))(apply);
+  }
+  new MutationObserver(apply).observe(document.documentElement,
+    {attributes: true, attributeFilter: ['data-theme']});
+})();
+"""
+
+
+def _figure(key, value, note="", highlight=False):
+    cls = "fv hl" if highlight else "fv"
+    n = f'<div class="fn">{html.escape(note)}</div>' if note else ""
+    return (f'<div><div class="fk">{html.escape(key)}</div>'
+            f'<div class="{cls}">{html.escape(value)}</div>{n}</div>')
+
+
+def _panel(title, caption, fig_html):
+    return (f'<div class="panel"><h3>{html.escape(title)}</h3>'
+            f'<p class="cap">{caption}</p>'
+            f'<div class="plot">{fig_html}</div></div>')
 
 
 def build_dashboard(
@@ -267,130 +397,150 @@ def build_dashboard(
     trace_window_s: tuple = (0.0, 10.0),
     inline_plotly: bool = True,
 ) -> Path:
-    """Render the full dashboard to a self-contained HTML file.
+    """Render the dashboard to a self-contained HTML file.
 
     Args:
-        recording: ``SynchronizedRecording`` being reported on.
+        recording: the ``SynchronizedRecording`` being reported on.
         summaries: ``{sensor_id: ChannelSummary}``.
         peaks_by_sensor: ``{sensor_id: peak indices}``.
-        event_label: Name of the abnormal-beat class being summarised.
-        examples: Output of ``representative_beats`` for the primary sensor.
-        caveats: Statements of what the numbers do not mean. Rendered
-            prominently rather than in a footnote -- a dashboard that shows an
-            arrhythmia burden without saying how it was derived invites the
-            reader to trust it further than the evidence allows.
-        inline_plotly: Embed the plotting library (~3.5 MB) so the file opens
-            offline. Always true for real reports; tests turn it off, since
-            embedding it repeatedly makes the suite too slow to be a useful
-            feedback loop.
+        event_label: name of the abnormal-beat class summarised.
+        examples: output of ``representative_beats`` for the primary sensor.
+        caveats: what the numbers do not mean, rendered near the top rather
+            than in a footnote. A dashboard showing an arrhythmia burden
+            without saying how it was derived invites more trust than the
+            evidence supports.
+        inline_plotly: embed the plotting library (~3.5 MB) so the file opens
+            offline. Tests turn it off; embedding it repeatedly makes the
+            suite too slow to be a useful feedback loop.
     """
     parts: list[str] = []
-    first = inline_plotly  # only the first figure carries the inlined plotly.js
+    first = inline_plotly
 
     primary_id = next(iter(summaries))
     primary = summaries[primary_id]
-
-    # ------------------------------------------------------------- header
-    total_beats = sum(s.n_beats for s in summaries.values())
     ev = primary.events.get(event_label)
+    total_beats = sum(s.n_beats for s in summaries.values())
+    esc = html.escape
 
     parts.append('<div class="wrap"><header>')
-    parts.append(f"<h1>{html.escape(title)}</h1>")
-    sub = subtitle or (
-        f"{recording.record_id} · {recording.n_channels} sensor(s) · "
-        f"{primary.duration_s / 3600:.2f} h"
-    )
-    parts.append(f'<div class="sub">{html.escape(sub)}</div></header>')
+    parts.append('<div class="kicker">Monitoring report</div>')
+    parts.append(f"<h1>{esc(title)}</h1>")
+    parts.append(f'<p class="meta">{esc(subtitle)}</p></header>')
 
-    # -------------------------------------------------------- key figures
-    parts.append("<h2>Overview</h2>")
-    parts.append('<div class="stats">')
-    parts.append(_stat("Recording", f"{primary.duration_s / 3600:.2f} h"))
-    parts.append(
-        _stat("Analysed", f"{primary.coverage.fraction * 100:.1f}%",
-              f"{primary.analysed_hours:.2f} h usable, {primary.coverage.n_gaps} gap(s)",
-              tone="good" if primary.coverage.fraction > 0.9 else "warn")
-    )
-    parts.append(_stat("Beats", f"{total_beats:,}"))
-    parts.append(_stat("Mean HR", f"{primary.mean_hr:.0f} bpm",
-                       f"min {primary.min_hr:.0f} / max {primary.max_hr:.0f}"))
+    # ---------------------------------------------------------- figures
+    parts.append("<h2>At a glance</h2>")
+    parts.append('<div class="figures">')
+    parts.append(_figure("Duration", f"{primary.duration_s / 3600:.2f} h"))
+    parts.append(_figure(
+        "Analysed", f"{primary.coverage.fraction * 100:.0f}%",
+        f"{primary.coverage.n_gaps} gap(s)"))
+    parts.append(_figure("Beats", f"{total_beats:,}"))
+    parts.append(_figure("Mean HR", f"{primary.mean_hr:.0f} bpm",
+                         f"{primary.min_hr:.0f}–{primary.max_hr:.0f}"))
     if ev is not None:
-        parts.append(_stat(f"{event_label} count", f"{ev.count:,}", tone="event"))
-        rate_note = f"{ev.per_hour:.1f}/h, peak hour {ev.max_hourly}"
+        note = f"{ev.per_hour:.0f}/h"
         if ev.rate_is_extrapolated:
-            rate_note = (f"{ev.per_hour:.0f}/h extrapolated from "
-                         f"{ev.analysed_hours:.2f} h")
-        parts.append(_stat(f"{event_label} burden", f"{ev.burden_pct:.2f}%",
-                           rate_note, tone="event"))
-    parts.append(_stat("SDNN", f"{primary.sdnn_ms:.0f} ms"))
-    parts.append(_stat("RMSSD", f"{primary.rmssd_ms:.0f} ms"))
+            note = f"{ev.per_hour:.0f}/h projected"
+        parts.append(_figure(f"{event_label}s", f"{ev.count:,}", highlight=True))
+        parts.append(_figure("Burden", f"{ev.burden_pct:.1f}%", note, highlight=True))
+    parts.append(_figure("SDNN", f"{primary.sdnn_ms:.0f} ms"))
     parts.append("</div>")
 
-    if ev is not None and ev.rate_is_extrapolated:
-        caveats = list(caveats or []) + [
-            f"This recording is {ev.analysed_hours:.2f} h long. The per-hour "
-            f"rate is projected from it, not measured over an hour; the burden "
-            f"percentage is unaffected."
-        ]
-
     if caveats:
-        parts.append('<div class="caveat"><strong>How to read this.</strong><ul>')
+        parts.append('<div class="readme"><b>Before reading the numbers</b><ul>')
         for c in caveats:
-            parts.append(f"<li>{html.escape(c)}</li>")
+            parts.append(f"<li>{esc(c)}</li>")
         parts.append("</ul></div>")
 
-    # ------------------------------------------------------------- trends
-    parts.append("<h2>Trends</h2>")
-    for fig_html in (
-        _hr_figure(primary, first),
-        _rr_figure(primary, False),
-        _sqi_figure(primary, False),
-    ):
-        parts.append(f'<div class="card">{fig_html}</div>')
-        first = False
+    # ----------------------------------------------------------- trends
+    parts.append("<h2>Trends over the recording</h2>")
 
-    # ------------------------------------------------------------- events
+    parts.append(_panel(
+        "Heart rate",
+        "Average beats per minute in each one-minute window. Breaks in the line "
+        "are stretches with no usable signal — they are left empty rather than "
+        "bridged, so a gap cannot be mistaken for a steady rate.",
+        _hr_figure(primary, first)))
+    first = False
+
+    parts.append('<div class="two">')
+    parts.append(_panel(
+        "RR intervals",
+        "One dot per heartbeat: the time since the previous beat. A tight band "
+        "is a regular rhythm; scatter means the spacing is varying. Ectopic "
+        "beats appear as low dots followed by a high one — early beat, then a pause.",
+        _rr_figure(primary, False)))
+    parts.append(_panel(
+        "Signal quality",
+        "How trustworthy the signal is, scored every 10 seconds. Anything below "
+        "the dotted line at 0.5 is treated as unusable and excluded from the "
+        "counts above.",
+        _sqi_figure(primary, False)))
+    parts.append("</div>")
+
+    # ----------------------------------------------------------- events
     if ev is not None:
-        parts.append(f"<h2>{html.escape(event_label)} distribution</h2>")
-        parts.append(f'<div class="card">{_events_figure(primary, event_label, False)}</div>')
+        unit = "hour" if ev.bin_s >= 3600 else f"{int(ev.bin_s / 60)}-minute"
+        parts.append(f"<h2>{esc(event_label)} events</h2>")
+        parts.append(_panel(
+            f"When they happened",
+            f"Count of flagged beats in each {unit} block. This is the chart that "
+            f"shows whether events are spread evenly through the recording or "
+            f"cluster into episodes — clustering is usually the clinically "
+            f"interesting pattern.",
+            _events_figure(primary, event_label, False)))
         if examples:
-            parts.append(
-                f'<div class="card">{_waveforms_figure(examples, event_label, False)}</div>'
-            )
+            parts.append(_panel(
+                "What they look like",
+                "Several flagged beats drawn on top of one another, lined up on "
+                "the beat itself (the dotted line). Overlaying them makes the "
+                "shared shape visible: a wide, tall complex unlike the patient's "
+                "normal beat. One tracing that disagrees with the rest is a "
+                "candidate false positive.",
+                _waveforms_figure(examples, False)))
 
-    # ------------------------------------------------------------ sensors
+    # ---------------------------------------------------------- sensors
     parts.append("<h2>Per-sensor comparison</h2>")
-    parts.append("<table><tr><th>Sensor</th><th>Position</th><th>Coverage</th>"
-                 "<th>Beats</th><th>Mean HR</th>"
-                 f"<th>{html.escape(event_label)}</th><th>Burden</th></tr>")
+    parts.append('<div class="panel"><h3>Summary by sensor</h3>')
+    parts.append('<p class="cap">The same heart seen from each recording '
+                 'position. Differences in beat count or burden between '
+                 'sensors are a signal in themselves: they mean the positions '
+                 'are not seeing the same events equally well.</p>')
+    parts.append('<div class="scroll"><table><tr><th>Sensor</th><th>Position</th>'
+                 '<th class="n">Coverage</th><th class="n">Beats</th>'
+                 f'<th class="n">Mean HR</th><th class="n">{esc(event_label)}</th>'
+                 '<th class="n">Burden</th></tr>')
     for sid, s in summaries.items():
         e = s.events.get(event_label)
         parts.append(
-            f"<tr><td>{html.escape(sid)}</td><td>{html.escape(s.position)}</td>"
-            f'<td class="num">{s.coverage.fraction * 100:.1f}%</td>'
-            f'<td class="num">{s.n_beats:,}</td>'
-            f'<td class="num">{s.mean_hr:.0f}</td>'
-            f'<td class="num">{e.count if e else 0:,}</td>'
-            f'<td class="num">{e.burden_pct if e else 0:.2f}%</td></tr>'
-        )
-    parts.append("</table>")
+            f"<tr><td>{esc(sid)}</td><td>{esc(s.position)}</td>"
+            f'<td class="n">{s.coverage.fraction * 100:.0f}%</td>'
+            f'<td class="n">{s.n_beats:,}</td>'
+            f'<td class="n">{s.mean_hr:.0f}</td>'
+            f'<td class="n">{e.count if e else 0:,}</td>'
+            f'<td class="n">{e.burden_pct if e else 0:.1f}%</td></tr>')
+    parts.append("</table></div></div>")
+
+    t0, t1 = trace_window_s
+    parts.append(_panel(
+        "Synchronised traces",
+        f"The raw signal from every sensor between {t0:g} and {t1:g} seconds, on "
+        f"one shared clock. Triangles mark detected beats. Because the axis is "
+        f"time from the recording start rather than each sensor's own first "
+        f"sample, sensors that started at different moments appear correctly "
+        f"offset instead of falsely aligned.",
+        _multichannel_figure(recording, peaks_by_sensor, trace_window_s, False)))
 
     parts.append(
-        f'<div class="card">'
-        f"{_multichannel_figure(recording, peaks_by_sensor, trace_window_s, False)}</div>"
-    )
-
-    parts.append(
-        '<footer>Generated by ecgmon. Research prototype — not a medical '
-        "device and not for diagnostic use.</footer></div>"
-    )
+        "<footer>Generated by ecgmon. Research prototype — not a medical device "
+        "and not for diagnostic use.</footer></div>")
 
     doc = (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"<title>{html.escape(title)}</title><style>{CSS}</style></head><body>"
+        f"<title>{esc(title)}</title><style>{CSS}</style></head><body>"
         + "".join(parts)
-        + "</body></html>"
+        + f"<script>{THEME_JS}</script></body></html>"
     )
 
     out_path = Path(out_path)

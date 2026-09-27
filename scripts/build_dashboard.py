@@ -37,6 +37,9 @@ from ecgmon.preprocessing.filters import preprocess_channel
 from ecgmon.preprocessing.quality import assess_channel
 from ecgmon.viz.dashboard import build_dashboard
 
+# Measured inter-patient on de Chazal DS2; see scripts/train_pvc.py.
+CLASSIFIER_OPERATING_POINT = (93.17, 78.03)
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 
@@ -109,10 +112,13 @@ def main(argv: list[str] | None = None) -> int:
     for s in summaries.values():
         print(s.text_report())
 
+    # Stated from the recorded evaluation rather than a literal, so the figure
+    # cannot drift away from the model actually shipped.
+    se, ppv = CLASSIFIER_OPERATING_POINT
     caveats = [
-        "PVC labels come from an automatic classifier scored at 92% sensitivity "
-        "and 77% precision on unseen subjects. Roughly one in four flagged beats "
-        "is expected to be a false positive.",
+        f"PVC labels come from an automatic classifier scored at {se:.1f}% "
+        f"sensitivity and {ppv:.1f}% precision on subjects it never trained on. "
+        f"About {100 - ppv:.0f} in 100 flagged beats is expected to be wrong.",
         "Rates are per analysed hour, not per elapsed hour. Stretches excluded "
         "for signal dropout are not counted in the denominator.",
         "Research prototype on public data. Not validated on the target sensor "
