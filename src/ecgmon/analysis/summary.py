@@ -296,6 +296,54 @@ def representative_beats(
     return out
 
 
+def examples_by_bin(
+    x: np.ndarray,
+    fs: float,
+    event_samples: np.ndarray,
+    edges: np.ndarray,
+    per_bin: int = 3,
+    before_s: float = 0.4,
+    after_s: float = 0.4,
+    decimals: int = 3,
+) -> list:
+    """Collect a few example waveforms from each histogram bin.
+
+    The distribution chart says a block of time held twelve flagged beats; it
+    cannot say whether they were real. These are the waveforms behind each
+    bar, so a reader can click a spike and judge it.
+
+    Only a handful per bin are kept, spread across the bin rather than taken
+    from its start, and rounded: the point is to let someone check a bar, not
+    to ship the whole recording inside the page.
+
+    Returns one list per bin of ``{"t": seconds, "y": [samples]}``.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    events = np.sort(np.asarray(event_samples, dtype=np.int64))
+    nb, na = int(round(before_s * fs)), int(round(after_s * fs))
+
+    out: list = []
+    for lo_s, hi_s in zip(edges[:-1], edges[1:]):
+        lo, hi = lo_s * fs, hi_s * fs
+        in_bin = events[(events >= lo) & (events < hi)]
+        picks = (
+            in_bin[np.linspace(0, in_bin.size - 1, min(per_bin, in_bin.size)).astype(int)]
+            if in_bin.size
+            else np.array([], dtype=np.int64)
+        )
+        bucket = []
+        for p in picks:
+            a, b = int(p) - nb, int(p) + na
+            if a < 0 or b >= x.size:
+                continue
+            bucket.append({
+                "t": round(float(p) / fs, 2),
+                "y": np.round(x[a:b], decimals).tolist(),
+            })
+        out.append(bucket)
+    return out
+
+
 def cross_sensor_agreement(
     event_by_sensor: dict, fs: float, tolerance_s: float = 0.15
 ) -> dict:

@@ -22,11 +22,12 @@ author standing next to it is not finished.
 from __future__ import annotations
 
 import html
+import json
 from pathlib import Path
 
 import numpy as np
 
-# Semantic roles, resolved to light/dark values at view time by THEME_JS.
+# Semantic roles, resolved to light/dark values at view time by interactive.js.
 # Kept as tokens here so the Python and the JavaScript cannot disagree.
 ROLE_INK = "ink"
 ROLE_MUTED = "muted"
@@ -307,68 +308,68 @@ td.n{text-align:right; font-variant-numeric:tabular-nums; padding-right:0}
 th.n{text-align:right; padding-right:0}
 tr:last-child td{border-bottom:0}
 
+.bar{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0 0 12px}
+.tabs{display:flex; gap:6px; flex-wrap:wrap}
+.tab{
+  font:inherit; font-size:12.5px; font-weight:550; padding:6px 13px;
+  border:1px solid var(--rule); background:var(--card); color:var(--ink-2);
+  border-radius:99px; cursor:pointer; transition:background .12s,color .12s;
+}
+.tab:hover{color:var(--ink)}
+.tab.on{background:var(--ink); color:var(--bg); border-color:var(--ink)}
+.tab:focus-visible,.ghost:focus-visible{outline:2px solid var(--trace); outline-offset:2px}
+.ghost{
+  font:inherit; font-size:12.5px; padding:6px 13px; margin-left:auto;
+  border:1px solid var(--rule); background:var(--card); color:var(--ink-2);
+  border-radius:99px; cursor:pointer;
+}
+.ghost:hover{color:var(--ink)}
+.hint{font-size:12px; color:var(--ink-3)}
+.panel.clickable{cursor:pointer}
+.panel .tip{
+  font-size:11.5px; color:var(--trace); font-weight:550;
+  margin:0 0 6px; display:flex; align-items:center; gap:5px;
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
 footer{margin-top:40px; padding-top:16px; border-top:1px solid var(--rule);
        color:var(--ink-3); font-size:12.5px}
 .js-modebar{opacity:.5}
 """
 
-# Applied after the plots exist. Plotly bakes colours into the serialised
-# figure, so a page that follows the viewer's theme has to restyle them here.
-THEME_JS = """
-(function () {
-  var ROLES = {
-    light: {ink:'#111820', muted:'#5a6572', grid:'rgba(120,132,148,.20)',
-            trace:'#2c7c9c', event:'#b3283c', good:'#3f8a63'},
-    dark:  {ink:'#e8ecf1', muted:'#9aa5b2', grid:'rgba(150,162,178,.18)',
-            trace:'#5fb3d4', event:'#e8697c', good:'#68bd92'}
-  };
-  var SWAP = {
-    '#8a94a3':'muted', 'rgba(138,148,163,0.22)':'grid',
-    '#3d8fb0':'trace', '#d1495b':'event', '#4f9e72':'good'
-  };
-  function theme() {
-    var set = document.documentElement.getAttribute('data-theme');
-    if (set === 'dark' || set === 'light') return set;
-    return window.matchMedia &&
-           window.matchMedia('(prefers-color-scheme: dark)').matches
-           ? 'dark' : 'light';
-  }
-  function walk(node, pal) {
-    if (Array.isArray(node)) { node.forEach(function (n) { walk(n, pal); }); return; }
-    if (!node || typeof node !== 'object') return;
-    Object.keys(node).forEach(function (k) {
-      var v = node[k];
-      if (typeof v === 'string' && SWAP[v]) node[k] = pal[SWAP[v]];
-      else if (v && typeof v === 'object') walk(v, pal);
-    });
-  }
-  function apply() {
-    if (!window.Plotly) return;
-    var pal = ROLES[theme()];
-    document.querySelectorAll('.js-plotly-plot').forEach(function (gd) {
-      try {
-        walk(gd.layout, pal);
-        walk(gd.data, pal);
-        if (gd.layout.font) gd.layout.font.color = pal.muted;
-        (gd.layout.annotations || []).forEach(function (a) {
-          if (a.font) a.font.color = pal.muted;
-        });
-        Plotly.react(gd, gd.data, gd.layout, gd._context);
-      } catch (e) { /* one bad plot must not blank the rest of the page */ }
-    });
-  }
-  function boot() { apply(); }
-  if (document.readyState === 'complete') { boot(); }
-  else { window.addEventListener('load', boot); }
-  if (window.matchMedia) {
-    var mq = window.matchMedia('(prefers-color-scheme: dark)');
-    (mq.addEventListener ? mq.addEventListener.bind(mq, 'change')
-                         : mq.addListener.bind(mq))(apply);
-  }
-  new MutationObserver(apply).observe(document.documentElement,
-    {attributes: true, attributeFilter: ['data-theme']});
-})();
-"""
+def _payload(recording, summaries, event_label, bin_examples) -> str:
+    """Data the page's script needs, as JSON.
+
+    Only the waveforms behind each histogram bar and the bar counts: enough to
+    answer "were those beats real", without shipping the whole recording.
+    """
+    counts = {}
+    for sid, sm in summaries.items():
+        ev = sm.events.get(event_label)
+        counts[sid] = ev.hourly_counts.tolist() if ev is not None else []
+    blob = json.dumps({
+        "fs": float(recording[0].fs),
+        "counts": counts,
+        "examples": bin_examples or {},
+    }, separators=(",", ":"))
+
+    # JSON inside a <script> block is not safe by virtue of being JSON. A
+    # sensor id containing "</script>" closes the block early and everything
+    # after it is parsed as HTML -- script injection through a field that
+    # merely names a piece of hardware. Escaping the three characters that can
+    # start an HTML token closes that off; they are valid JSON escapes, so the
+    # parsed value is unchanged.
+    return (blob.replace("<", "\\u003c")
+                .replace(">", "\\u003e")
+                .replace("&", "\\u0026"))
+
+
+def _interactive_js() -> str:
+    """The dashboard's behaviour, kept beside this module as real JavaScript.
+
+    Held in a .js file rather than a Python string so it stays syntax-checked
+    and diffable.
+    """
+    return (Path(__file__).with_name("interactive.js")).read_text(encoding="utf-8")
 
 
 def _figure(key, value, note="", highlight=False):
@@ -378,9 +379,25 @@ def _figure(key, value, note="", highlight=False):
             f'<div class="{cls}">{html.escape(value)}</div>{n}</div>')
 
 
-def _panel(title, caption, fig_html):
+def _panel(title, caption, fig_html, link=None, events_for=None, tip=None):
+    """One chart with its heading and explanation.
+
+    ``link`` puts the plot in a shared time group so zooming one zooms all of
+    them; ``events_for`` marks it as the clickable histogram for that sensor.
+    The attributes land on the plot's own div, which is what the script binds
+    Plotly event handlers to.
+    """
+    attrs = ""
+    if link:
+        attrs += f' data-link-time="{html.escape(link)}"'
+    if events_for:
+        attrs += f' data-events-for="{html.escape(events_for)}"'
+    # The markers must sit on the graph div itself, not a wrapper.
+    fig_html = fig_html.replace('class="plotly-graph-div"',
+                                f'class="plotly-graph-div"{attrs}', 1)
+    tip_html = (f'<p class="tip">&#9656; {html.escape(tip)}</p>') if tip else ""
     return (f'<div class="panel"><h3>{html.escape(title)}</h3>'
-            f'<p class="cap">{caption}</p>'
+            f'<p class="cap">{caption}</p>{tip_html}'
             f'<div class="plot">{fig_html}</div></div>')
 
 
@@ -396,6 +413,7 @@ def build_dashboard(
     caveats: list | None = None,
     trace_window_s: tuple = (0.0, 10.0),
     inline_plotly: bool = True,
+    bin_examples: dict | None = None,
 ) -> Path:
     """Render the dashboard to a self-contained HTML file.
 
@@ -412,6 +430,10 @@ def build_dashboard(
         inline_plotly: embed the plotting library (~3.5 MB) so the file opens
             offline. Tests turn it off; embedding it repeatedly makes the
             suite too slow to be a useful feedback loop.
+        bin_examples: ``{sensor_id: [[{"t","y"}, ...], ...]}`` from
+            ``examples_by_bin`` -- the waveforms behind each histogram bar,
+            so a reader can click a spike and see whether those beats were
+            real rather than taking the count on trust.
     """
     parts: list[str] = []
     first = inline_plotly
@@ -453,51 +475,70 @@ def build_dashboard(
         parts.append("</ul></div>")
 
     # ----------------------------------------------------------- trends
-    parts.append("<h2>Trends over the recording</h2>")
-
-    parts.append(_panel(
-        "Heart rate",
-        "Average beats per minute in each one-minute window. Breaks in the line "
-        "are stretches with no usable signal — they are left empty rather than "
-        "bridged, so a gap cannot be mistaken for a steady rate.",
-        _hr_figure(primary, first)))
-    first = False
-
-    parts.append('<div class="two">')
-    parts.append(_panel(
-        "RR intervals",
-        "One dot per heartbeat: the time since the previous beat. A tight band "
-        "is a regular rhythm; scatter means the spacing is varying. Ectopic "
-        "beats appear as low dots followed by a high one — early beat, then a pause.",
-        _rr_figure(primary, False)))
-    parts.append(_panel(
-        "Signal quality",
-        "How trustworthy the signal is, scored every 10 seconds. Anything below "
-        "the dotted line at 0.5 is treated as unusable and excluded from the "
-        "counts above.",
-        _sqi_figure(primary, False)))
+    sensor_ids = list(summaries)
+    parts.append("<h2>Trends and events</h2>")
+    parts.append('<div class="bar">')
+    if len(sensor_ids) > 1:
+        parts.append('<div class="tabs" role="tablist">')
+        for i, sid in enumerate(sensor_ids):
+            on = " on" if i == 0 else ""
+            parts.append(
+                f'<button class="tab{on}" role="tab" data-sensor-tab="{esc(sid)}" '
+                f'aria-selected="{str(i == 0).lower()}">{esc(sid)}</button>')
+        parts.append("</div>")
+    parts.append('<span class="hint" id="zoom-note-trends"></span>')
+    parts.append('<button class="ghost" id="theme-btn" type="button">Dark</button>')
     parts.append("</div>")
 
-    # ----------------------------------------------------------- events
-    if ev is not None:
-        unit = "hour" if ev.bin_s >= 3600 else f"{int(ev.bin_s / 60)}-minute"
-        parts.append(f"<h2>{esc(event_label)} events</h2>")
+    for i, sid in enumerate(sensor_ids):
+        sm = summaries[sid]
+        sev = sm.events.get(event_label)
+        hidden = "" if i == 0 else " hidden"
+        parts.append(f'<div data-sensor-panel="{esc(sid)}"{hidden}>')
+
         parts.append(_panel(
-            f"When they happened",
-            f"Count of flagged beats in each {unit} block. This is the chart that "
-            f"shows whether events are spread evenly through the recording or "
-            f"cluster into episodes — clustering is usually the clinically "
-            f"interesting pattern.",
-            _events_figure(primary, event_label, False)))
-        if examples:
+            "Heart rate",
+            "Average beats per minute in each one-minute window. Breaks in the "
+            "line are stretches with no usable signal - left empty rather than "
+            "bridged, so a gap cannot be read as a steady rate. Drag across any "
+            "chart to zoom; the others follow.",
+            _hr_figure(sm, first), link="trends"))
+        first = False
+
+        parts.append('<div class="two">')
+        parts.append(_panel(
+            "RR intervals",
+            "One dot per heartbeat: the time since the previous beat. A tight "
+            "band is a regular rhythm; scatter means the spacing is varying. "
+            "Ectopic beats show as a low dot followed by a high one - an early "
+            "beat, then a compensatory pause.",
+            _rr_figure(sm, False), link="trends"))
+        parts.append(_panel(
+            "Signal quality",
+            "How trustworthy the signal is, scored every 10 seconds. Below the "
+            "dotted line at 0.5 it is treated as unusable and excluded from the "
+            "counts above.",
+            _sqi_figure(sm, False), link="trends"))
+        parts.append("</div>")
+
+        if sev is not None:
+            unit = "hour" if sev.bin_s >= 3600 else f"{int(sev.bin_s / 60)}-minute"
             parts.append(_panel(
-                "What they look like",
-                "Several flagged beats drawn on top of one another, lined up on "
-                "the beat itself (the dotted line). Overlaying them makes the "
-                "shared shape visible: a wide, tall complex unlike the patient's "
-                "normal beat. One tracing that disagrees with the rest is a "
-                "candidate false positive.",
-                _waveforms_figure(examples, False)))
+                f"When {event_label}s happened",
+                f"Flagged beats in each {unit} block. This is what shows whether "
+                f"events spread evenly through the recording or cluster into "
+                f"episodes, which is usually the more interesting pattern.",
+                _events_figure(sm, event_label, False),
+                events_for=sid,
+                tip="Click a bar to see the beats behind it"))
+
+            parts.append(
+                f'<div class="panel"><h3>Beats behind the bar</h3>'
+                f'<p class="cap" id="inspect-cap-{esc(sid)}">'
+                f'Click a bar above to load the waveforms from that block.</p>'
+                f'<div class="plot" id="inspect-{esc(sid)}"></div></div>')
+
+        parts.append("</div>")
 
     # ---------------------------------------------------------- sensors
     parts.append("<h2>Per-sensor comparison</h2>")
@@ -540,7 +581,8 @@ def build_dashboard(
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>{esc(title)}</title><style>{CSS}</style></head><body>"
         + "".join(parts)
-        + f"<script>{THEME_JS}</script></body></html>"
+        + f"<script>window.__ECG__={_payload(recording, summaries, event_label, bin_examples)};</script>"
+        + f"<script>{_interactive_js()}</script></body></html>"
     )
 
     out_path = Path(out_path)

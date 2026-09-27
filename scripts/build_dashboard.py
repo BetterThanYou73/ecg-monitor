@@ -28,6 +28,7 @@ from ecgmon.analysis.morphology import (
     features_to_array,
 )
 from ecgmon.analysis.summary import (
+    examples_by_bin,
     representative_beats,
     summarize_channel,
 )
@@ -80,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     summaries: dict = {}
     peaks_by_sensor: dict = {}
     examples: list = []
+    bin_examples: dict = {}
 
     for i, raw in enumerate(rec):
         print(f"\nProcessing {raw.sensor_id}...")
@@ -99,11 +101,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {pvc_samples.size} classified ventricular")
 
         sqi = assess_channel(raw, window_s=10.0)
-        summaries[raw.sensor_id] = summarize_channel(
+        summary = summarize_channel(
             raw, peaks,
             event_samples={"PVC": pvc_samples},
             sqi_windows=sqi,
         )
+        summaries[raw.sensor_id] = summary
+
+        ev = summary.events.get("PVC")
+        if ev is not None and ev.hour_edges.size:
+            bin_examples[raw.sensor_id] = examples_by_bin(
+                clean.signal, clean.fs, pvc_samples, ev.hour_edges
+            )
 
         if i == 0:
             examples = representative_beats(clean.signal, clean.fs, pvc_samples, n=6)
@@ -139,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         caveats=caveats,
         trace_window_s=(args.window[0], args.window[1]),
+        bin_examples=bin_examples,
     )
 
     size_kb = path.stat().st_size / 1024
